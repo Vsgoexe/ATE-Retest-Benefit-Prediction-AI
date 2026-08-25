@@ -115,22 +115,32 @@ st.markdown("""
     }
     .workflow-step { color: #e2e8f0; }
     .workflow-arrow { color: #64748b; }
-    .wf-title {
-        font-size: 15px; font-weight: 700; letter-spacing: 0.8px;
-        text-transform: uppercase; color: #d8b4fe; margin-bottom: 8px;
+    .wf-panel {
+        background: #111a2d; border: 1px solid #1e2c4a; border-radius: 12px;
+        padding: 22px 24px; min-height: 300px; margin-bottom: 12px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+        display: flex; flex-direction: column;
     }
-    .wf-steps { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
-    .wf-item { font-size: 15px; font-weight: 600; }
+    .wf-title {
+        font-size: 18px; font-weight: 700; letter-spacing: 0.8px;
+        text-transform: uppercase; color: #d8b4fe; margin-bottom: 16px;
+    }
+    .wf-steps {
+        display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px;
+        align-items: center; flex: 1;
+    }
+    .wf-item { font-size: 17px; font-weight: 600; }
     .wf-item.done { color: #6ee7b7; }
     .wf-item.now {
         color: #d8b4fe; border: 1px solid #a855f7; border-radius: 8px;
-        padding: 3px 8px; background: rgba(168, 85, 247, 0.12);
+        padding: 8px 12px; background: rgba(168, 85, 247, 0.12);
+        display: inline-block;
     }
     .wf-item.todo { color: #64748b; }
-    .wf-arrow { color: #475569; font-size: 15px; }
+    .wf-arrow { color: #475569; font-size: 17px; margin-right: 6px; }
     .wf-rec { color: #10b981; font-weight: 700; }
     .wf-skip { color: #ef4444; font-weight: 700; }
-    .wf-blurb { font-size: 13px; color: #94a3b8; margin-top: 8px; line-height: 1.4; }
+    .wf-blurb { font-size: 14px; color: #94a3b8; margin-top: 16px; line-height: 1.5; }
     .data-source-pill {
         display: inline-block; background: rgba(168, 85, 247, 0.15);
         border: 1px solid #a855f7; color: #d8b4fe;
@@ -308,11 +318,10 @@ def render_analysis_workflow(current_stage):
     parts = []
     for i, (mark, label) in enumerate(zip(marks, labels), start=1):
         prefix = "✓ " if mark == "done" else ("● " if mark == "now" else "○ ")
-        if i > 1:
-            parts.append('<span class="wf-arrow">→</span>')
-        parts.append(f'<span class="wf-item {mark}">{prefix}{i}. {label}</span>')
+        arrow = '<span class="wf-arrow">→</span>' if i > 1 else ""
+        parts.append(f'<span class="wf-item {mark}">{arrow}{prefix}{i}. {label}</span>')
     html = (
-        '<div class="dark-card-compact">'
+        '<div class="wf-panel">'
         '<div class="wf-title">How AI Analysis Works</div>'
         f'<div class="wf-steps">{"".join(parts)}</div>'
         '<div class="wf-blurb">The AI analyzes pre-retest failure events and recommends whether a retest may be beneficial. '
@@ -853,22 +862,6 @@ if current_page == "overview":
     else:
         st.markdown("### Overview")
 
-        toggle_label = (
-            "− Upload Pre-Retest Data"
-            if st.session_state.get("show_pre_retest_upload")
-            else "+ Upload Pre-Retest Data"
-        )
-        toggle_col, clear_col, _ = st.columns([2, 2, 4])
-        with toggle_col:
-            if st.button(toggle_label, key="toggle_pre_retest_upload"):
-                st.session_state["show_pre_retest_upload"] = not st.session_state.get("show_pre_retest_upload", False)
-                st.rerun()
-        if has_active_analysis:
-            with clear_col:
-                if st.button("Clear Analysis", key="clear_analysis"):
-                    _clear_analysis_state()
-                    st.rerun()
-
         if m12_has_outcomes:
             workflow_stage = "validate"
         elif has_active_analysis:
@@ -876,9 +869,23 @@ if current_page == "overview":
         else:
             workflow_stage = "empty"
 
-        if st.session_state.get("show_pre_retest_upload"):
-            upload_col, workflow_col = st.columns([2, 5], gap="medium")
-            with upload_col:
+        toggle_label = (
+            "− Upload Pre-Retest Data"
+            if st.session_state.get("show_pre_retest_upload")
+            else "+ Upload Pre-Retest Data"
+        )
+        workflow_col, upload_col = st.columns([5, 2], gap="medium")
+        with workflow_col:
+            render_analysis_workflow(workflow_stage)
+        with upload_col:
+            if st.button(toggle_label, key="toggle_pre_retest_upload", use_container_width=True):
+                st.session_state["show_pre_retest_upload"] = not st.session_state.get("show_pre_retest_upload", False)
+                st.rerun()
+            if has_active_analysis:
+                if st.button("Clear Analysis", key="clear_analysis", use_container_width=True):
+                    _clear_analysis_state()
+                    st.rerun()
+            if st.session_state.get("show_pre_retest_upload"):
                 pre_retest_file = st.file_uploader(
                     "Pre-retest events workbook",
                     type=["xlsx"],
@@ -904,10 +911,6 @@ if current_page == "overview":
                             st.rerun()
                         except Exception as e:
                             st.error(str(e))
-            with workflow_col:
-                render_analysis_workflow(workflow_stage)
-        else:
-            render_analysis_workflow(workflow_stage)
 
         if not has_active_analysis:
             st.caption("Upload a pre-retest workbook and select Analyze with AI to start analysis.")
