@@ -29,6 +29,12 @@ EVAL_REPORTING_CUTOFF = 0.5
 RANDOM_SEED = 42
 MODEL_VERSION = "retest_option_b_v1"
 
+# Optional Recursive Least Squares online calibration.
+# Does not retrain or modify the primary classifier.
+RLS_FORGETTING_FACTOR = 0.995
+RLS_MIN_UPDATES_BEFORE_ACTIVE = 20
+RLS_INITIAL_P_SCALE = 100.0
+
 # Target Definition
 TARGET_COL = "Ground_Truth"
 TARGET_MAPPING = {

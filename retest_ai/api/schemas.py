@@ -48,6 +48,9 @@ class SinglePredictionResponse(BaseModel):
     Failure_Event: Optional[int] = None
     probability_retest_beneficial: float
     probability_percent: float
+    probability_base: Optional[float] = None
+    probability_adapted: Optional[float] = None
+    online_adaptation_active: Optional[bool] = None
     recommendation: str
     policy_label: str
     policy_threshold: float
@@ -59,6 +62,9 @@ class BatchPredictionItem(BaseModel):
     Failure_Event: Optional[int] = None
     probability_retest_beneficial: float
     probability_percent: Optional[float] = None
+    probability_base: Optional[float] = None
+    probability_adapted: Optional[float] = None
+    online_adaptation_active: Optional[bool] = None
     recommendation: str
     policy_label: Optional[str] = None
     policy_threshold: Optional[float] = None

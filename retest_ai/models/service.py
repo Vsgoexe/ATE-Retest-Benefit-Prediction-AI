@@ -28,6 +28,11 @@ from ..decision.decision_policy import (
     apply_decision_policy,
     apply_batch_decision_policy,
 )
+from .online_learning import (
+    ADAPTED_PROB_COL,
+    BASE_PROB_COL,
+    RLSCalibrator,
+)
 from ..validation.outcome_validator import validate_recommendations_against_outcomes
 
 ARTIFACT_FILE = os.path.join(ARTIFACTS_DIR, "model_artifacts.pkl")
@@ -55,6 +60,7 @@ class MLService:
         self.explainer = None
         self.selection_reason = ""
         self.month_12_outcomes = None
+        self.rls_calibrator = RLSCalibrator()
         self._initialize_pipeline()
 
     def _initialize_pipeline(self):
@@ -113,12 +119,18 @@ class MLService:
         X_clean, _ = prepare_xy(df_single, is_inference=True)
         assert_no_leakage_in_feature_matrix(X_clean.columns)
         prob = float(self.final_model.predict_proba(X_clean)[0, 1])
-        prob_clipped = float(np.clip(prob, 0.0, 1.0))
-        policy = apply_decision_policy(prob_clipped)
+        base = float(np.clip(prob, 0.0, 1.0))
+        adapted = float(self.rls_calibrator.adapt_probability(base))
+        active = bool(self.rls_calibrator.is_active)
+        final = adapted if active else base
+        policy = apply_decision_policy(final)
 
         result = {
-            "probability_retest_beneficial": round(prob_clipped, 4),
-            "probability_percent": round(prob_clipped * 100.0, 2),
+            "probability_retest_beneficial": round(final, 4),
+            "probability_percent": round(final * 100.0, 2),
+            "probability_base": round(base, 4),
+            "probability_adapted": round(adapted, 4),
+            "online_adaptation_active": active,
             "recommendation": policy["recommendation"],
             "policy_label": policy["policy_label"],
             "policy_threshold": policy["policy_threshold"],
@@ -150,11 +162,17 @@ class MLService:
         X, _ = prepare_xy(df_work, is_inference=True)
         assert_no_leakage_in_feature_matrix(X.columns)
         probs = self.final_model.predict_proba(X)[:, 1]
+        base = np.clip(np.asarray(probs, dtype=float), 0.0, 1.0)
+        adapted = np.asarray(self.rls_calibrator.adapt_probability(base), dtype=float)
+        active = bool(self.rls_calibrator.is_active)
+        final = adapted if active else base
 
         df_out = df_work.copy()
-        df_out["P(RETEST_BENEFICIAL)"] = np.round(probs, 4)
-        df_out["Probability_%"] = np.round(probs * 100.0, 2)
-        recs = apply_batch_decision_policy(probs)
+        df_out[BASE_PROB_COL] = np.round(base, 4)
+        df_out[ADAPTED_PROB_COL] = np.round(adapted, 4)
+        df_out["P(RETEST_BENEFICIAL)"] = np.round(final, 4)
+        df_out["Probability_%"] = np.round(final * 100.0, 2)
+        recs = apply_batch_decision_policy(final)
         df_out["AI_Recommendation"] = recs["AI_Recommendation"].values
         df_out["Policy_Label"] = POLICY_LABEL
         return df_out
@@ -261,3 +279,26 @@ class MLService:
         return validate_recommendations_against_outcomes(
             table[TARGET_COL], table["AI_Recommendation"], events=table
         )
+
+    def get_online_learning_status(self) -> Dict[str, Any]:
+        """Diagnostic status for the optional RLS calibration layer. Separate from Month 12 outcomes."""
+        info = self.rls_calibrator.status()
+        info["base_model"] = self.model_name
+        return info
+
+    def reset_online_learning(self) -> Dict[str, Any]:
+        """Clear RLS state only. Does not touch the trained model, uploads, or outcomes."""
+        self.rls_calibrator.reset()
+        return self.get_online_learning_status()
+
+    def adapt_probability(self, probabilities) -> np.ndarray:
+        """Apply RLS calibration to base probabilities. Pass-through while inactive."""
+        adapted = self.rls_calibrator.adapt_probability(probabilities)
+        return np.asarray(adapted, dtype=float)
+
+    def update_from_validated_outcomes(self, df: Optional[pd.DataFrame]) -> Dict[str, Any]:
+        """
+        Learn from an explicitly approved joined prediction/outcome frame.
+        Uses base probability and Ground_Truth only. Does not set month_12_outcomes.
+        """
+        return self.rls_calibrator.update_from_validated_frame(df)

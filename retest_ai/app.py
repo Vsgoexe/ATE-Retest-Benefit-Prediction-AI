@@ -198,6 +198,10 @@ st.markdown("""
     .info-bar-text-label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
     .info-bar-text-val { font-size: 13px; font-weight: 700; color: #f1f5f9; }
     .policy-note { font-size: 12px; color: #94a3b8; margin-top: 8px; }
+    .ol-row { display: flex; justify-content: space-between; gap: 12px; margin: 4px 0; }
+    .ol-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #64748b; }
+    .ol-val { font-size: 13px; font-weight: 700; color: #f1f5f9; text-align: right; }
+    .ol-behavior { font-size: 12px; color: #94a3b8; margin-top: 8px; line-height: 1.4; }
     div[data-baseweb="select"] > div {
         background-color: #0d1526 !important; border-color: #1e2c4a !important; color: #ffffff !important; border-radius: 8px !important;
     }
@@ -452,6 +456,8 @@ def _init_analysis_session():
         "uploaded_pre_retest_name": None,
         "pending_pre_retest_name": None,
         "outcome_uploader_nonce": 0,
+        "online_learning_flash": None,
+        "confirm_reset_online_learning": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -497,6 +503,99 @@ def _join_active_validation(preds, outcomes):
         return None
     extra = [c for c in [TARGET_COL, "Retest_Result", "Final_Result"] if c in outcomes.columns]
     return preds.merge(outcomes[list(dict.fromkeys(keys + extra))], on=keys, how="inner", suffixes=("", "_outcome"))
+
+
+def _online_learning_flash_message(result):
+    if not result:
+        return None, None
+    if result.get("reset"):
+        return "info", "Online learning was reset. Future predictions use the base model until new validated outcomes are learned."
+    if result.get("already_learned"):
+        return "info", "These validated outcomes have already been used for online learning."
+    learned = int(result.get("learned") or 0)
+    if learned <= 0 and not result.get("reset"):
+        skipped = int(result.get("skipped") or 0)
+        if skipped:
+            return "warning", f"No valid Ground_Truth rows were available for online learning ({skipped} skipped)."
+        return "warning", "No valid Ground_Truth rows were available for online learning."
+    if result.get("active"):
+        return "success", f"Online learning updated with {learned} validated events. The adaptation layer is active."
+    collected = int(result.get("update_count") or learned)
+    threshold = int(result.get("activation_threshold") or 20)
+    return "success", (
+        f"Online learning has collected {collected} validated events. "
+        f"It will begin adapting predictions after {threshold} events."
+    )
+
+
+def render_online_learning_panel(m12_val, m12_has_outcomes):
+    status = ml_service.get_online_learning_status()
+    update_count = int(status.get("update_count") or 0)
+    threshold = int(status.get("activation_threshold") or 20)
+    active = bool(status.get("active"))
+    if active:
+        learned_display = str(update_count)
+        adaptation_label = "Active"
+        behavior = "Future probabilities are adjusted using recent approved post-retest outcomes."
+        adapt_color = "#6ee7b7"
+    else:
+        learned_display = f"{update_count} / {threshold}"
+        adaptation_label = "Warming Up"
+        behavior = "Predictions currently use the base model until enough validated outcomes are learned."
+        adapt_color = "#fbbf24"
+
+    if m12_has_outcomes and m12_val is not None and len(m12_val) > 0:
+        if st.button("Learn from These Validated Outcomes", key="learn_validated_outcomes"):
+            result = ml_service.update_from_validated_outcomes(m12_val)
+            st.session_state["online_learning_flash"] = result
+            st.rerun()
+
+    flash = st.session_state.get("online_learning_flash")
+    if flash:
+        kind, message = _online_learning_flash_message(flash)
+        if kind == "success":
+            st.success(message)
+        elif kind == "warning":
+            st.warning(message)
+        elif kind == "info":
+            st.info(message)
+        st.session_state["online_learning_flash"] = None
+
+    st.markdown(
+        f"""
+        <div class="dark-card-compact">
+            <div class="dark-card-header" style="margin-bottom:8px;">ONLINE LEARNING</div>
+            <div class="ol-row"><div class="ol-label">Base Model</div><div class="ol-val">{ml_service.model_name}</div></div>
+            <div class="ol-row"><div class="ol-label">Validated Events Learned</div><div class="ol-val">{learned_display}</div></div>
+            <div class="ol-row"><div class="ol-label">Adaptation</div><div class="ol-val" style="color:{adapt_color};">{adaptation_label}</div></div>
+            <div class="ol-row"><div class="ol-label">Forgetting Factor</div><div class="ol-val">{status.get("forgetting_factor")}</div></div>
+            <div class="ol-behavior">{behavior}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.get("confirm_reset_online_learning"):
+        st.warning(
+            "Resetting online learning returns future predictions to the base model until new "
+            "validated outcomes are learned. This does not delete the trained model, uploaded "
+            "predictions, outcomes, or validation results."
+        )
+        confirm_col, cancel_col = st.columns(2)
+        with confirm_col:
+            if st.button("Confirm Reset", key="confirm_reset_online_learning_yes"):
+                ml_service.reset_online_learning()
+                st.session_state["confirm_reset_online_learning"] = False
+                st.session_state["online_learning_flash"] = {"reset": True}
+                st.rerun()
+        with cancel_col:
+            if st.button("Cancel", key="confirm_reset_online_learning_no"):
+                st.session_state["confirm_reset_online_learning"] = False
+                st.rerun()
+    else:
+        if st.button("Reset Online Learning", key="reset_online_learning"):
+            st.session_state["confirm_reset_online_learning"] = True
+            st.rerun()
 
 
 def render_month12_analysis(df_m12, m12_has_outcomes, source_label=UPLOADED_SOURCE_LABEL):
@@ -1024,6 +1123,7 @@ if current_page == "overview":
                     "Device counts are unique across these two KPIs and sum to the AI Recommended RETEST devices. "
                     "A device with any unnecessary post-retest event is counted as Unnecessary Retest."
                 )
+            render_online_learning_panel(m12_val, m12_has_outcomes)
 
             st.markdown('<div class="dark-card"><div class="dark-card-header">Model Quality</div>', unsafe_allow_html=True)
             st.caption("Historical Temporal Validation — Month 0 train / Month 6 holdout. These metrics are not the current upload's performance.")
@@ -1091,6 +1191,9 @@ elif current_page == "single":
     prob_val = pred_res["probability_retest_beneficial"]
     prob_pct = pred_res["probability_percent"]
     rec = pred_res["recommendation"]
+    base_p = float(pred_res.get("probability_base", prob_val))
+    adapted_p = float(pred_res.get("probability_adapted", prob_val))
+    ol_active = bool(pred_res.get("online_adaptation_active", False))
     explanation = explainer.explain_instance(event_row)
 
     col_left, col_right = st.columns([5, 5])
@@ -1120,6 +1223,12 @@ elif current_page == "single":
             <div class="prob-focal-value">{prob_pct:.1f}%</div>
             <div style="font-size: 12px; color: #64748b; margin-top: 4px;">
                 P(RETEST_BENEFICIAL) = <code style="color:#a855f7;">{prob_val:.4f}</code>
+            </div>
+            <div style="font-size: 12px; color: #94a3b8; margin-top: 10px; text-align: left; line-height: 1.6;">
+                Base Probability: <code style="color:#38bdf8;">{base_p * 100:.1f}%</code><br>
+                Adapted Probability: <code style="color:#a855f7;">{adapted_p * 100:.1f}%</code><br>
+                Final Recommendation: <b>{rec}</b><br>
+                Online adaptation: {"Active" if ol_active else "Not active"}
             </div>
         </div>
         """, unsafe_allow_html=True)
