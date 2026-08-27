@@ -128,6 +128,15 @@ class TestPreRetestUpload(unittest.TestCase):
         self.assertEqual(counts["dont_retest"], int(value_counts.get("DON'T RETEST", 0)))
         self.assertEqual(counts["retest"] + counts["dont_retest"], counts["total_events"])
 
+        impact = self.ml_service.get_cost_impact(predicted, cost_per_hour=1800.0)
+        self.assertGreaterEqual(impact["all_device_retest_cost"], impact["ai_predicted_retest_cost"])
+        self.assertAlmostEqual(
+            impact["estimated_savings"],
+            impact["all_device_retest_cost"] - impact["ai_predicted_retest_cost"],
+        )
+        self.assertIn("Estimated_Retest_Time_sec", predicted.columns)
+        self.assertNotIn("Retest_Time_sec", predicted.columns)
+
         subset = predicted.head(20).copy()
         subset_counts = overview_recommendation_counts(subset)
         subset_vc = subset["AI_Recommendation"].astype(str).str.strip().value_counts()

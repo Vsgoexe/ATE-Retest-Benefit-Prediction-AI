@@ -60,6 +60,8 @@ class TestModels(unittest.TestCase):
         self.assertTrue(set(df_m12_batch["AI_Recommendation"].unique()).issubset({"RETEST", "DON'T RETEST"}))
         self.assertNotIn("Ground_Truth", df_m12_batch.columns)
         self.assertNotIn("Retest_Time_sec", df_m12_batch.columns)
+        self.assertIn("Estimated_Retest_Time_sec", df_m12_batch.columns)
+        self.assertTrue((df_m12_batch["Estimated_Retest_Time_sec"] >= 0).all())
 
     def test_month_12_does_not_use_private_outcomes_for_prediction(self):
         ml_service = MLService.get_instance()

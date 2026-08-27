@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from retest_ai.config.settings import (
     ALL_MODEL_FEATURES,
+    ATE_COST_CURRENCY,
+    ATE_COST_PER_HOUR,
     IDENTIFIER_COLS,
     MONTH_12_OUTCOMES_FILE,
     TARGET_COL,
@@ -19,6 +21,13 @@ from retest_ai.models.service import MLService
 from retest_ai.decision.decision_policy import (
     DOCX_REFERENCE_THRESHOLD,
     POLICY_LABEL,
+    RETEST_LABEL,
+)
+from retest_ai.kpis.business_impact import (
+    ESTIMATED_TIME_COL,
+    format_money,
+    format_seconds,
+    seconds_to_cost,
 )
 import importlib
 from retest_ai.kpis.breakdowns import filter_month12_batch_table
@@ -160,6 +169,7 @@ st.markdown("""
         letter-spacing: 1px; color: #64748b; margin-bottom: 4px;
     }
     .kpi-value { font-size: 38px; font-weight: 800; font-family: 'JetBrains Mono', monospace; color: #ffffff; line-height: 1.1; }
+    .kpi-value-cost { font-size: 28px; font-weight: 800; font-family: 'JetBrains Mono', monospace; color: #ffffff; line-height: 1.1; }
     .kpi-sub { font-size: 12px; color: #64748b; margin-top: 8px; }
     .kpi-pair { display: flex; align-items: flex-end; gap: 28px; }
     .kpi-pair-item { display: flex; flex-direction: column; }
@@ -239,7 +249,9 @@ datasets = ml_service.datasets
 
 EVENT_DETAIL_COLS = [
     "Device_ID", "Failure_Event", "Fail_Test", "Fail_Bin", "Wafer_ID", "ATE_Site",
-    "Voltage_V", "Temperature_C", "P(RETEST_BENEFICIAL)", "AI_Recommendation", "Ground_Truth"
+    "Voltage_V", "Temperature_C", "First_Test_Time_sec", ESTIMATED_TIME_COL,
+    "Estimated_Retest_Cost", "AI_Predicted_Retest_Cost",
+    "P(RETEST_BENEFICIAL)", "AI_Recommendation", "Ground_Truth"
 ]
 
 
@@ -292,6 +304,35 @@ def kpi_pct_events_devices_card_html(label, pct, events, devices, color="#ffffff
         "</div>"
         "</div>"
     )
+
+
+def kpi_cost_card_html(label, value, sub, color="#ffffff", context_label=None):
+    context = f'<div class="kpi-context">{context_label}</div>' if context_label else ""
+    return (
+        '<div class="kpi-card">'
+        f"{context}"
+        f'<div class="kpi-top"><div class="kpi-label">{label}</div></div>'
+        f'<div class="kpi-value-cost" style="color:{color};">{value}</div>'
+        f'<div class="kpi-sub">{sub}</div>'
+        "</div>"
+    )
+
+
+def _active_cost_per_hour():
+    return max(float(st.session_state.get("ate_cost_per_hour", ATE_COST_PER_HOUR)), 0.0)
+
+
+def _with_cost_columns(df, cost_per_hour=None):
+    if df is None or len(df) == 0:
+        return df
+    out = df if ESTIMATED_TIME_COL in df.columns else ml_service.attach_estimated_retest_times(df)
+    out = out.copy()
+    rate = ATE_COST_PER_HOUR if cost_per_hour is None else cost_per_hour
+    times = pd.to_numeric(out[ESTIMATED_TIME_COL], errors="coerce").fillna(0.0)
+    out["Estimated_Retest_Cost"] = (times * (max(float(rate), 0.0) / 3600.0)).round(2)
+    rec = out["AI_Recommendation"].astype(str).str.strip() if "AI_Recommendation" in out.columns else pd.Series("", index=out.index)
+    out["AI_Predicted_Retest_Cost"] = out["Estimated_Retest_Cost"].where(rec == RETEST_LABEL, 0.0).round(2)
+    return out
 
 
 def _go_overview_view(view):
@@ -429,6 +470,78 @@ def render_recommendation_inspect(
     show_event_table(filtered, table_title)
 
 
+def render_cost_inspect(df_m12, impact, view, back_key):
+    _back_to_overview_button(back_key)
+    cost_df = _with_cost_columns(df_m12, impact["cost_per_hour"])
+    rec = cost_df["AI_Recommendation"].astype(str).str.strip()
+    if view == "ai_retest_cost":
+        shown = cost_df[rec == RETEST_LABEL].copy()
+        title = "AI predicted retest cost"
+        caption = (
+            f"{format_money(impact['ai_predicted_retest_cost'], impact['currency'])}  \n"
+            f"{int(impact['retest_recommendations_count'])} RETEST events · "
+            f"{format_seconds(impact['ai_predicted_retest_time_sec'])} · "
+            f"{format_money(impact['cost_per_hour'], impact['currency'])}/h"
+        )
+        chart_title = "Estimated cost of AI RETEST events by Fail_Test"
+        value_col = "AI_Predicted_Retest_Cost"
+    else:
+        shown = cost_df.copy()
+        title = "Actual cost of all devices"
+        caption = (
+            f"{format_money(impact['all_device_retest_cost'], impact['currency'])}  \n"
+            f"If every failure event is retested · {int(impact['total_events'])} events · "
+            f"{format_seconds(impact['all_device_retest_time_sec'])} · "
+            f"{format_money(impact['cost_per_hour'], impact['currency'])}/h"
+        )
+        chart_title = "Estimated all-device retest cost by Fail_Test"
+        value_col = "Estimated_Retest_Cost"
+
+    st.markdown(f"**{title}**")
+    st.caption(caption)
+    st.caption(
+        "Duration is estimated from historical Retest_Time_sec by Fail_Test (Month 0 + Month 6). "
+        "It is not actual Month 12 tester time and not used as a model feature."
+    )
+
+    compare_df = pd.DataFrame({
+        "Scenario": ["All devices retested", "AI recommended RETEST", "Estimated savings"],
+        "Cost": [
+            impact["all_device_retest_cost"],
+            impact["ai_predicted_retest_cost"],
+            impact["estimated_savings"],
+        ],
+    })
+    fig_cmp = px.bar(
+        compare_df,
+        x="Scenario",
+        y="Cost",
+        color="Scenario",
+        color_discrete_map={
+            "All devices retested": "#38bdf8",
+            "AI recommended RETEST": "#10b981",
+            "Estimated savings": "#a855f7",
+        },
+        title="Tester-time cost comparison",
+    )
+    _style_inspect_fig(fig_cmp, height=230, title="Tester-time cost comparison")
+    st.plotly_chart(fig_cmp, use_container_width=True)
+
+    if "Fail_Test" in shown.columns and len(shown) > 0:
+        by_test = (
+            shown.groupby("Fail_Test", dropna=False)[value_col]
+            .sum()
+            .reset_index()
+            .sort_values(value_col, ascending=False)
+        )
+        by_test.columns = ["Fail_Test", "Cost"]
+        fig_test = px.bar(by_test, x="Fail_Test", y="Cost", color_discrete_sequence=["#38bdf8"], title=chart_title)
+        _style_inspect_fig(fig_test, height=230, title=chart_title)
+        st.plotly_chart(fig_test, use_container_width=True)
+
+    show_event_table(shown, title)
+
+
 def _month12_test_family(val):
     s = str(val).lower()
     if "scan" in s:
@@ -458,6 +571,7 @@ def _init_analysis_session():
         "outcome_uploader_nonce": 0,
         "online_learning_flash": None,
         "confirm_reset_online_learning": False,
+        "ate_cost_per_hour": float(ATE_COST_PER_HOUR),
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -705,11 +819,13 @@ def render_month12_analysis(df_m12, m12_has_outcomes, source_label=UPLOADED_SOUR
 
     st.caption(f"Showing {len(df_filtered)} of {len(df_m12)} events")
 
+    cost_view = _with_cost_columns(df_filtered, _active_cost_per_hour())
     disp_cols = [c for c in [
         "Device_ID", "Failure_Event", "Fail_Test", "Fail_Bin", "Voltage_V", "Temperature_C",
+        ESTIMATED_TIME_COL, "AI_Predicted_Retest_Cost",
         "P(RETEST_BENEFICIAL)", "AI_Recommendation",
-    ] if c in df_filtered.columns]
-    display_df = df_filtered[disp_cols].copy()
+    ] if c in cost_view.columns]
+    display_df = cost_view[disp_cols].copy()
     display_df.insert(0, "S.No", range(1, len(display_df) + 1))
     st.dataframe(display_df, use_container_width=True, height=360, hide_index=True)
 
@@ -807,6 +923,8 @@ if current_page == "overview":
     m12_has_outcomes = False
     benefit_n = persist_n = 0
     benefit_rate = 0.0
+    cost_impact = None
+    cost_per_hour = _active_cost_per_hour()
     if has_active_analysis:
         counts = overview_recommendation_counts(df_m12)
         n_retest = counts["retest"]
@@ -819,6 +937,7 @@ if current_page == "overview":
         dont_retest_device_ids = all_device_ids - retest_device_ids
         retest_devices = len(retest_device_ids)
         dont_retest_devices = len(dont_retest_device_ids)
+        cost_impact = ml_service.get_cost_impact(df_m12, cost_per_hour=cost_per_hour)
         if st.session_state.get("outcomes_loaded_for_active_dataset"):
             m12_val = _join_active_validation(df_m12, st.session_state.get("active_outcomes"))
             if m12_val is not None and len(m12_val) > 0:
@@ -958,6 +1077,20 @@ if current_page == "overview":
             table_title="DON'T RETEST events",
         )
 
+    elif overview_view == "all_device_cost":
+        if cost_impact is None:
+            _back_to_overview_button("back_all_device_cost_empty")
+            st.caption("Upload a pre-retest workbook and analyze with AI to estimate cost.")
+        else:
+            render_cost_inspect(df_m12, cost_impact, "all_device_cost", "back_all_device_cost")
+
+    elif overview_view == "ai_retest_cost":
+        if cost_impact is None:
+            _back_to_overview_button("back_ai_retest_cost_empty")
+            st.caption("Upload a pre-retest workbook and analyze with AI to estimate cost.")
+        else:
+            render_cost_inspect(df_m12, cost_impact, "ai_retest_cost", "back_ai_retest_cost")
+
     else:
         st.markdown("### Overview")
 
@@ -1028,6 +1161,58 @@ if current_page == "overview":
                 st.markdown('<div class="kpi-gap">' + kpi_events_devices_card_html("DON'T RETEST", str(n_skip), str(dont_retest_devices), "#ef4444", context_label="AI Recommended") + "</div>", unsafe_allow_html=True)
                 if st.button("Inspect", key="ov_kpi_dont_retest", use_container_width=True):
                     _go_overview_view("dont_retest_recommendations")
+
+            st.markdown('<div class="kpi-row-spacer"></div>', unsafe_allow_html=True)
+            st.markdown('<div class="dark-card-header">Retest Cost Estimate</div>', unsafe_allow_html=True)
+            st.caption(
+                f"Cost = estimated retest time × {format_money(cost_per_hour, ATE_COST_CURRENCY)}/h tester rate "
+                "(configurable on Decision Policy). Time is estimated from historical Retest_Time_sec by Fail_Test, "
+                "not from actual Month 12 retest duration."
+            )
+            c1, c2, c3 = st.columns(3, gap="medium")
+            with c1:
+                st.markdown(
+                    '<div class="kpi-gap">'
+                    + kpi_cost_card_html(
+                        "All-device retest cost",
+                        format_money(cost_impact["all_device_retest_cost"], ATE_COST_CURRENCY),
+                        f"{n_m12} events · {format_seconds(cost_impact['all_device_retest_time_sec'])}",
+                        "#38bdf8",
+                        context_label="If every fail is retested",
+                    )
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+                if st.button("Inspect", key="ov_kpi_all_cost", use_container_width=True):
+                    _go_overview_view("all_device_cost")
+            with c2:
+                st.markdown(
+                    '<div class="kpi-gap">'
+                    + kpi_cost_card_html(
+                        "AI predicted retest cost",
+                        format_money(cost_impact["ai_predicted_retest_cost"], ATE_COST_CURRENCY),
+                        f"{n_retest} RETEST events · {format_seconds(cost_impact['ai_predicted_retest_time_sec'])}",
+                        "#10b981",
+                        context_label="AI recommended RETEST",
+                    )
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+                if st.button("Inspect", key="ov_kpi_ai_cost", use_container_width=True):
+                    _go_overview_view("ai_retest_cost")
+            with c3:
+                st.markdown(
+                    '<div class="kpi-gap">'
+                    + kpi_cost_card_html(
+                        "Estimated savings",
+                        format_money(cost_impact["estimated_savings"], ATE_COST_CURRENCY),
+                        f"{n_skip} skipped events · {format_seconds(cost_impact['skipped_retest_time_sec'])}",
+                        "#a855f7",
+                        context_label="All-device minus AI retest",
+                    )
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
 
             st.markdown('<div class="kpi-row-spacer"></div>', unsafe_allow_html=True)
 
@@ -1210,6 +1395,7 @@ elif current_page == "single":
             <div class="param-item"><div class="param-item-label">Voltage</div><div class="param-item-val">{event_row['Voltage_V'].values[0]:.2f} V</div></div>
             <div class="param-item"><div class="param-item-label">Temperature</div><div class="param-item-val">{event_row['Temperature_C'].values[0]} °C</div></div>
             <div class="param-item"><div class="param-item-label">First Test Time</div><div class="param-item-val">{event_row['First_Test_Time_sec'].values[0]:.1f} s</div></div>
+            <div class="param-item"><div class="param-item-label">Est. Retest Time</div><div class="param-item-val">{float(pred_res.get('estimated_retest_time_sec') or 0):.1f} s</div></div>
             <div class="param-item"><div class="param-item-label">Initial Result</div><div class="param-item-val" style="color:#ef4444;">{event_row['First_Result'].values[0]}</div></div>
         </div>
         """, unsafe_allow_html=True)
@@ -1248,6 +1434,23 @@ elif current_page == "single":
                 <div class="policy-note">{POLICY_LABEL}<br>If P &lt; {DOCX_REFERENCE_THRESHOLD:.2f} → DON'T RETEST. Probability is not modified by this policy.</div>
             </div>
             """, unsafe_allow_html=True)
+        est_sec = float(pred_res.get("estimated_retest_time_sec") or 0.0)
+        pred_sec = float(pred_res.get("predicted_retest_time_sec") or 0.0)
+        event_cost = seconds_to_cost(pred_sec, _active_cost_per_hour())
+        if_run_cost = seconds_to_cost(est_sec, _active_cost_per_hour())
+        st.markdown(
+            f"""
+            <div class="param-item" style="margin-top:14px;">
+                <div class="param-item-label">Predicted retest cost</div>
+                <div class="param-item-val" style="color:{'#10b981' if rec == 'RETEST' else '#ef4444'};">{format_money(event_cost, ATE_COST_CURRENCY)}</div>
+                <div class="policy-note">
+                    Estimated duration {est_sec:.1f} s · rate {format_money(_active_cost_per_hour(), ATE_COST_CURRENCY)}/h.
+                    {"Charged because AI recommends RETEST." if rec == "RETEST" else f"AI skip → $0. If retested anyway, about {format_money(if_run_cost, ATE_COST_CURRENCY)}."}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="dark-card"><div class="dark-card-header">Which input features contributed to this prediction?</div>', unsafe_allow_html=True)
@@ -1371,8 +1574,11 @@ elif current_page == "info":
         st.markdown("""
         - `Ground_Truth`, `Retest_Result`, `Final_Result`, `Retest_Count`
         - `True_Retest_Pass_Probability`, `AI_Retest_Probability`, `AI_Recommendation`
-        - `Retest_Time_sec`
+        - `Retest_Time_sec` (actual post-retest duration; never a feature)
         - Device_ID / Failure_Event (tracking only)
+
+        Estimated retest time on the Overview cost cards is a KPI derived from historical
+        `Retest_Time_sec` by `Fail_Test`. It is attached after scoring and is not a model input.
         """)
 
 
@@ -1398,3 +1604,15 @@ elif current_page == "settings":
     </div>
     """, unsafe_allow_html=True)
     st.warning("There is no 50% threshold and no threshold slider in this prototype.")
+    st.markdown("### ATE tester cost rate")
+    st.caption(
+        "Used only for cost KPIs: all-device retest cost vs AI predicted retest cost. "
+        "This is a configurable plant input, not a rate from the workbooks, and it does not change the ML probability."
+    )
+    st.number_input(
+        "ATE tester cost per hour (USD)",
+        min_value=0.0,
+        step=50.0,
+        key="ate_cost_per_hour",
+        help="Cost = estimated retest seconds × (this rate / 3600).",
+    )

@@ -34,6 +34,13 @@ from .online_learning import (
     RLSCalibrator,
 )
 from ..validation.outcome_validator import validate_recommendations_against_outcomes
+from ..kpis.business_impact import (
+    ESTIMATED_TIME_COL,
+    attach_estimated_retest_times,
+    build_retest_time_lookup,
+    calculate_time_and_cost_impact,
+    estimate_retest_time_seconds,
+)
 
 ARTIFACT_FILE = os.path.join(ARTIFACTS_DIR, "model_artifacts.pkl")
 
@@ -60,8 +67,32 @@ class MLService:
         self.explainer = None
         self.selection_reason = ""
         self.month_12_outcomes = None
+        self.retest_time_lookup = self._build_retest_time_lookup()
         self.rls_calibrator = RLSCalibrator()
         self._initialize_pipeline()
+
+    def _build_retest_time_lookup(self) -> Dict[str, Any]:
+        frames = [
+            self.datasets[key]
+            for key in ("month_0", "month_6")
+            if key in self.datasets and self.datasets[key] is not None
+        ]
+        if not frames:
+            return build_retest_time_lookup(None)
+        return build_retest_time_lookup(pd.concat(frames, ignore_index=True))
+
+    def attach_estimated_retest_times(self, df: pd.DataFrame) -> pd.DataFrame:
+        return attach_estimated_retest_times(df, self.retest_time_lookup)
+
+    def estimate_retest_time_for_event(self, event: pd.DataFrame) -> float:
+        times = estimate_retest_time_seconds(event, self.retest_time_lookup)
+        if len(times) == 0:
+            return 0.0
+        return float(times.iloc[0])
+
+    def get_cost_impact(self, df: pd.DataFrame, cost_per_hour: Optional[float] = None) -> Dict[str, Any]:
+        framed = df if ESTIMATED_TIME_COL in df.columns else self.attach_estimated_retest_times(df)
+        return calculate_time_and_cost_impact(framed, cost_per_hour=cost_per_hour)
 
     def _initialize_pipeline(self):
         """Initializes and trains or loads the pipeline artifacts."""
@@ -125,6 +156,8 @@ class MLService:
         final = adapted if active else base
         policy = apply_decision_policy(final)
 
+        est_time = self.estimate_retest_time_for_event(df_single)
+        predicted_time = est_time if policy["is_retest"] else 0.0
         result = {
             "probability_retest_beneficial": round(final, 4),
             "probability_percent": round(final * 100.0, 2),
@@ -134,6 +167,8 @@ class MLService:
             "recommendation": policy["recommendation"],
             "policy_label": policy["policy_label"],
             "policy_threshold": policy["policy_threshold"],
+            "estimated_retest_time_sec": round(est_time, 2),
+            "predicted_retest_time_sec": round(predicted_time, 2),
             "model": self.model_name,
             "version": self.model_version,
         }
@@ -175,6 +210,7 @@ class MLService:
         recs = apply_batch_decision_policy(final)
         df_out["AI_Recommendation"] = recs["AI_Recommendation"].values
         df_out["Policy_Label"] = POLICY_LABEL
+        df_out = self.attach_estimated_retest_times(df_out)
         return df_out
 
     def predict_pre_retest_table(self, df: pd.DataFrame) -> pd.DataFrame:

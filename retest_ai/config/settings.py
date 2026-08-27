@@ -22,6 +22,11 @@ if not os.path.exists(MONTH_12_OUTCOMES_FILE):
         os.path.dirname(WORKSPACE_DIR), "Month_12_PRIVATE_VALIDATION_ONLY.xlsx"
     )
 
+# Configurable ATE tester-time rate for cost KPIs. Not present in the workbooks
+# and not a measured plant rate — override in the Decision Policy screen.
+ATE_COST_PER_HOUR = 1800.0
+ATE_COST_CURRENCY = "USD"
+
 # Evaluation/reporting cutoff for model comparison tables only.
 # This is NOT the operational decision policy (see decision/decision_policy.py).
 EVAL_REPORTING_CUTOFF = 0.5

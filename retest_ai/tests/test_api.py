@@ -52,6 +52,13 @@ class TestFastAPI(unittest.TestCase):
         self.assertEqual(data["Device_ID"], "DEV001")
         self.assertEqual(data["Failure_Event"], 1)
         self.assertEqual(data["policy_threshold"], 0.30)
+        self.assertIn("estimated_retest_time_sec", data)
+        self.assertGreaterEqual(data["estimated_retest_time_sec"], 0.0)
+        self.assertIn("predicted_retest_time_sec", data)
+        if data["recommendation"] == "DON'T RETEST":
+            self.assertEqual(data["predicted_retest_time_sec"], 0.0)
+        else:
+            self.assertEqual(data["predicted_retest_time_sec"], data["estimated_retest_time_sec"])
         if data["probability_retest_beneficial"] >= 0.30:
             self.assertEqual(data["recommendation"], "RETEST")
         else:

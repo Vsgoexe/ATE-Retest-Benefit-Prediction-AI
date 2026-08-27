@@ -54,6 +54,8 @@ class SinglePredictionResponse(BaseModel):
     recommendation: str
     policy_label: str
     policy_threshold: float
+    estimated_retest_time_sec: Optional[float] = None
+    predicted_retest_time_sec: Optional[float] = None
     model: str
     version: Optional[str] = None
 
@@ -68,6 +70,8 @@ class BatchPredictionItem(BaseModel):
     recommendation: str
     policy_label: Optional[str] = None
     policy_threshold: Optional[float] = None
+    estimated_retest_time_sec: Optional[float] = None
+    predicted_retest_time_sec: Optional[float] = None
     model: Optional[str] = None
     version: Optional[str] = None
 
