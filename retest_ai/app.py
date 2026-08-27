@@ -126,7 +126,7 @@ st.markdown("""
     .workflow-arrow { color: #64748b; }
     .wf-panel {
         background: #111a2d; border: 1px solid #1e2c4a; border-radius: 12px;
-        padding: 22px 24px; min-height: 300px; margin-bottom: 12px;
+        padding: 22px 24px; min-height: 360px; margin-bottom: 12px;
         box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
         display: flex; flex-direction: column;
     }
@@ -346,19 +346,23 @@ def _back_to_overview_button(key):
 
 
 def render_analysis_workflow(current_stage):
-    if current_stage == "validate":
-        marks = ["done", "done", "done", "done", "done", "now"]
+    if current_stage == "learned":
+        marks = ["done", "done", "done", "done", "done", "done", "done", "now"]
+    elif current_stage == "validate":
+        marks = ["done", "done", "done", "done", "done", "done", "now", "todo"]
     elif current_stage == "recommend":
-        marks = ["done", "done", "now", "todo", "todo", "todo"]
+        marks = ["done", "done", "now", "now", "todo", "todo", "todo", "todo"]
     else:
-        marks = ["now", "todo", "todo", "todo", "todo", "todo"]
+        marks = ["now", "todo", "todo", "todo", "todo", "todo", "todo", "todo"]
     labels = [
         "Upload Pre-Retest Data",
         "Analyze with AI",
         'AI Recommendation — <span class="wf-rec">RETEST</span> or <span class="wf-skip">DON\'T RETEST</span>',
+        "Estimate Retest Cost — all-device vs AI",
         "Perform Actual Retest",
         "Upload Actual Outcomes",
         "Validate AI Recommendation",
+        'Click <b>Learn from These Validated Outcomes</b> — RLS (not automatic)',
     ]
     parts = []
     for i, (mark, label) in enumerate(zip(marks, labels), start=1):
@@ -369,8 +373,10 @@ def render_analysis_workflow(current_stage):
         '<div class="wf-panel">'
         '<div class="wf-title">How AI Analysis Works</div>'
         f'<div class="wf-steps">{"".join(parts)}</div>'
-        '<div class="wf-blurb">The AI analyzes pre-retest failure events and recommends whether a retest may be beneficial. '
-        "After actual testing, upload the outcomes to validate the AI recommendations.</div>"
+        '<div class="wf-blurb">The AI recommends whether a retest may be beneficial and estimates '
+        "tester-time cost for all devices vs AI-selected retests. After actual testing, upload outcomes "
+        "to validate the recommendations. Online (RLS) learning starts only if you explicitly click "
+        "<b>Learn from These Validated Outcomes</b> — it does not run automatically after verification.</div>"
         "</div>"
     )
     st.markdown(html, unsafe_allow_html=True)
@@ -571,6 +577,7 @@ def _init_analysis_session():
         "outcome_uploader_nonce": 0,
         "online_learning_flash": None,
         "confirm_reset_online_learning": False,
+        "outcomes_learned_for_active_dataset": False,
         "ate_cost_per_hour": float(ATE_COST_PER_HOUR),
     }
     for key, value in defaults.items():
@@ -585,6 +592,7 @@ def _reset_service_outcomes():
 def _reset_validation_state(bump_outcome_uploader=True):
     st.session_state["active_outcomes"] = None
     st.session_state["outcomes_loaded_for_active_dataset"] = False
+    st.session_state["outcomes_learned_for_active_dataset"] = False
     _reset_service_outcomes()
     if bump_outcome_uploader:
         st.session_state["outcome_uploader_nonce"] = int(st.session_state.get("outcome_uploader_nonce") or 0) + 1
@@ -662,6 +670,8 @@ def render_online_learning_panel(m12_val, m12_has_outcomes):
         if st.button("Learn from These Validated Outcomes", key="learn_validated_outcomes"):
             result = ml_service.update_from_validated_outcomes(m12_val)
             st.session_state["online_learning_flash"] = result
+            if result and (int(result.get("learned") or 0) > 0 or result.get("already_learned")):
+                st.session_state["outcomes_learned_for_active_dataset"] = True
             st.rerun()
 
     flash = st.session_state.get("online_learning_flash")
@@ -700,6 +710,7 @@ def render_online_learning_panel(m12_val, m12_has_outcomes):
             if st.button("Confirm Reset", key="confirm_reset_online_learning_yes"):
                 ml_service.reset_online_learning()
                 st.session_state["confirm_reset_online_learning"] = False
+                st.session_state["outcomes_learned_for_active_dataset"] = False
                 st.session_state["online_learning_flash"] = {"reset": True}
                 st.rerun()
         with cancel_col:
@@ -1094,7 +1105,9 @@ if current_page == "overview":
     else:
         st.markdown("### Overview")
 
-        if m12_has_outcomes:
+        if m12_has_outcomes and st.session_state.get("outcomes_learned_for_active_dataset"):
+            workflow_stage = "learned"
+        elif m12_has_outcomes:
             workflow_stage = "validate"
         elif has_active_analysis:
             workflow_stage = "recommend"
